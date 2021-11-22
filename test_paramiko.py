@@ -1,22 +1,9 @@
 import re
+import time
 
 import paramiko
 
 from argparse_methods import argument_parser
-
-client = paramiko.SSHClient()
-client.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-
-request_commands = [
-    {"OS_name": ["cat /etc/os-release", "PRETTY_NAME="]},
-    {"kernel_version": ["uname -r", None]},
-    {"process_list": ["ls /proc/", None]},
-    {"users_list": ["cat /etc/passwd", None]}
-]
-
-
-# pwdx - путь к процессу
-# ls -l /proc/14193/exe
 
 
 class SshRequest:
@@ -25,16 +12,29 @@ class SshRequest:
         self.username = username
         self.password = password
         self.port = port
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy)
 
     def connector(self):
-        client.connect(
+        self.client.connect(
             hostname=self.hostname,
             username=self.username,
             password=self.password,
             port=self.port,
-            timeout=5,
             look_for_keys=False,
             allow_agent=False)
+
+    def execute_command(self, command):
+        stdin, stdout, stderr = self.client.exec_command(command)
+
+        while not stdout.channel.exit_status_ready():
+            time.sleep(0.1)
+
+        data_decode = stdout.read().decode("utf-8") + stderr.read().decode("utf-8")
+
+        exit_status = stdout.channel.exit_status
+
+        return data_decode, exit_status
 
 
 def convert_to_int(lst):
@@ -47,6 +47,16 @@ def convert_to_int(lst):
     return list_of_number
 
 
+def print_res(to_print):
+    if type(to_print) == list or type(to_print) == set:
+        for p in to_print:
+            print(p)
+    else:
+        print(to_print)
+
+    print("-" * 30)
+
+
 if __name__ == '__main__':
     def result(args_values):
         hname = args_values.ip.partition('@')[-1]
@@ -54,57 +64,40 @@ if __name__ == '__main__':
         password = args_values.password
 
         try:
-            SshRequest(hname, *uname, password, args_values.p).connector()
+            ssh_request_item = SshRequest(hname, *uname, password, args_values.p)
+            ssh_request_item.connector()
 
-            for i in request_commands:
-                command_name = i.keys()
-                command = i.get(*command_name)
+            data_decode = ssh_request_item.execute_command("cat /etc/os-release")
+            print_res(re.search(r'.*PRETTY_NAME=\"(.*)\"', data_decode[0]).groups()[0])
 
-                stdin, stdout, stderr = client.exec_command(command[0])
-                data_decode = stdout.read().decode("utf-8") + stderr.read().decode("utf-8")
+            # _________________________________________________________________________________________________________
 
-                search_string = command[1] if len(command) > 1 else None
-                data_list = data_decode.split()
+            data_decode = ssh_request_item.execute_command("uname -r")
+            print_res(data_decode[0])
 
-                to_print = []
+            # _________________________________________________________________________________________________________
 
-                if search_string is not None:
-                    to_print = re.search(r'.*PRETTY_NAME=\"(.*)\"', data_decode).groups()[0]
+            data_decode = ssh_request_item.execute_command("ls /proc/")
+            data_list = data_decode[0].split()
+            converted_list = convert_to_int(data_list)
+            to_print = []
+            for j in converted_list:
+                data_decode1, exit_status = ssh_request_item.execute_command("readlink -f /proc/" + str(j) + "/exe")
+                if exit_status == 0:
+                    to_print.append(data_decode1.replace("\n", ""))
+            print_res(set(to_print))
 
-                elif ''.join(command_name) == 'process_list':
-                    converted_list = convert_to_int(data_list)
-                    for j in converted_list:
-                        # print('j--------------------->>>>',j)
-                        stdin, stdout, stderr = client.exec_command("readlink -f /proc/" + str(j) + "/exe")
+            # _________________________________________________________________________________________________________
+            data_decode = ssh_request_item.execute_command("cat /etc/passwd")
+            data_list = data_decode[0].split()
+            to_print = []
+            for item in data_list:
+                i = re.search(r"^(.*):[x].*(/bin/bash)$", item)
+                if i is not None:
+                    to_print.append("user= " + i.groups()[0])
+            print_res(to_print)
 
-                        data_decode = stdout.read().decode("utf-8") + stderr.read().decode("utf-8")
-                        exit_status = stdout.channel.exit_status
-                        exit_status_ready = stdout.channel.exit_status_ready()
-
-                        if exit_status_ready:
-                            if exit_status == 0:
-                                to_print.append(data_decode.replace("\n", ""))
-
-                elif ''.join(command_name) == 'users_list':
-                    for item in data_list:
-                        i = re.search(r"^(.*):[x].*(/bin/bash)$", item)
-                        if i is not None:
-                            to_print.append("user= " + i.groups()[0])
-                else:
-                    to_print = data_decode
-
-                print("result of  OS(" + str(*uname) + ") and  command " +
-                      "(" + str(*command_name) + "): ")
-
-                if type(to_print) == list:
-                    for p in to_print:
-                        print(p)
-                else:
-                    print(to_print)
-
-                print("-" * 30)
-
-            client.close()
+            ssh_request_item.client.close()
 
         except Exception as err:
             print(f'Error occurred: {err}')
